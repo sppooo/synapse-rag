@@ -1,0 +1,13 @@
+Chapter 1 – Fundamentals of Neural Networks
+
+A neural network is a machine learning model inspired by how the human brain works. It contains layers of connected nodes called neurons. Each neuron receives inputs, applies a transformation, and passes the result to the next layer.
+
+Neural networks learn patterns from data. The process begins with forward propagation, where input flows through the layers to produce an output. After calculating the output, the loss function measures how far the prediction is from the true value.
+
+Backpropagation adjusts the weights. It calculates gradients and updates each weight to reduce the error. This procedure repeats for many epochs until the model learns accurately.
+
+Neural networks include activation functions such as ReLU, Sigmoid, Tanh, and Softmax. These functions help the network learn non-linear relationships.
+
+Common applications include image recognition, speech processing, and text analysis. Neural networks work best with large datasets and powerful hardware. They may overfit, so regularization methods are often required.
+
+This chapter introduces neural networks, their components, how they learn, and where they are used in modern AI.
