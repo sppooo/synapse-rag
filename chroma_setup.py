@@ -11,7 +11,7 @@ chroma_client = chromadb.PersistentClient(path="db")
 # Chroma will use its default (all-MiniLM-L6-v2 ONNX) which is lighter
 # than installing sentence-transformers + torch ourselves.
 collection = chroma_client.get_or_create_collection(
-    name="synapse_rag"
+    name="synapse_rag_v2"
 )
 
 
