@@ -87,20 +87,31 @@ def query_chunks(query_text: str, top_k: int = 5):
     if not query_text.strip():
         return []
 
-    # Use query_texts instead of manual embeddings
-    results = collection.query(
-        query_texts=[query_text],
-        n_results=top_k,
-    )
+    try:
+        results = collection.query(
+            query_texts=[query_text],
+            n_results=top_k,
+        )
+    except Exception as e:
+        print("[ERROR] Chroma query failed:", e)
+        return []
 
     chunks = []
-    if not results["documents"]:
-        return chunks
 
-    for i in range(len(results["documents"][0])):
+    # Defensive checks: Chroma returns lists-of-lists
+    docs_list = results.get("documents") or []
+    metas_list = results.get("metadatas") or []
+
+    if not docs_list or not docs_list[0]:
+        print("[INFO] No documents returned from Chroma.")
+        return []
+
+    for i in range(len(docs_list[0])):
+        text = docs_list[0][i]
+        meta = metas_list[0][i] if metas_list and metas_list[0] else {}
         chunks.append({
-            "text": results["documents"][0][i],
-            "source": results["metadatas"][0][i].get("source", "unknown")
+            "text": text,
+            "source": meta.get("source", "unknown")
         })
 
     return chunks
