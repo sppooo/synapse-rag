@@ -1,20 +1,17 @@
 import chromadb
-from sentence_transformers import SentenceTransformer
 import os
 
 # -----------------------------------
-# EMBEDDING MODEL
+# CHROMA PERSISTENT CLIENT
 # -----------------------------------
-embedding_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
-
-# -----------------------------------
-# CHROMA PERSISTENT CLIENT (NEW STYLE)
-# -----------------------------------
-# This is the recommended way in new Chroma versions
 chroma_client = chromadb.PersistentClient(path="db")
 
+# IMPORTANT:
+# We do NOT pass an embedding_function here.
+# Chroma will use its default (all-MiniLM-L6-v2 ONNX) which is lighter
+# than installing sentence-transformers + torch ourselves.
 collection = chroma_client.get_or_create_collection(
-    name="synapse_rag"  # you can change the name if you want
+    name="synapse_rag"
 )
 
 
@@ -24,7 +21,7 @@ collection = chroma_client.get_or_create_collection(
 def load_documents(folder: str = "documents"):
     docs = []
 
-    print("[DEBUG] Current working dir:", os.getcwd())
+    print("[DEBUG] CWD:", os.getcwd())
     print("[DEBUG] Looking for folder:", folder)
 
     if not os.path.exists(folder):
@@ -73,13 +70,10 @@ def ingest_documents():
     texts = [d["text"] for d in docs]
     metadatas = [{"source": d["source"]} for d in docs]
 
-    print(f"[INFO] Encoding {len(texts)} chunks...")
-    embeddings = embedding_model.encode(texts).tolist()
-
+    print(f"[INFO] Adding {len(texts)} chunks to Chroma (Chroma will embed them).")
     collection.add(
         ids=ids,
         documents=texts,
-        embeddings=embeddings,
         metadatas=metadatas,
     )
 
@@ -93,15 +87,16 @@ def query_chunks(query_text: str, top_k: int = 5):
     if not query_text.strip():
         return []
 
-    query_embedding = embedding_model.encode(query_text).tolist()
-
+    # Use query_texts instead of manual embeddings
     results = collection.query(
-        query_embeddings=[query_embedding],
+        query_texts=[query_text],
         n_results=top_k,
     )
 
     chunks = []
-    # results["documents"] and ["metadatas"] are lists of lists
+    if not results["documents"]:
+        return chunks
+
     for i in range(len(results["documents"][0])):
         chunks.append({
             "text": results["documents"][0][i],
@@ -110,8 +105,8 @@ def query_chunks(query_text: str, top_k: int = 5):
 
     return chunks
 
+
 if __name__ == "__main__":
-    # Check how many records are in the collection
     count = collection.count()
     print(f"[INFO] Collection currently has {count} records.")
 
@@ -120,4 +115,3 @@ if __name__ == "__main__":
         ingest_documents()
     else:
         print("[INFO] ChromaDB already initialized with data. Skipping ingestion.")
-
