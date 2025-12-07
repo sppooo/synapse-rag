@@ -1,18 +1,37 @@
 import chromadb
 import os
+from pypdf import PdfReader  # <-- NEW: for PDF support
 
 # -----------------------------------
 # CHROMA PERSISTENT CLIENT
 # -----------------------------------
 chroma_client = chromadb.PersistentClient(path="db")
 
-# IMPORTANT:
-# We do NOT pass an embedding_function here.
-# Chroma will use its default (all-MiniLM-L6-v2 ONNX) which is lighter
-# than installing sentence-transformers + torch ourselves.
+# We let Chroma handle embeddings internally (all-MiniLM-L6-v2 ONNX)
 collection = chroma_client.get_or_create_collection(
     name="synapse_rag_v2"
 )
+
+# Supported file types
+SUPPORTED_TEXT_EXT = {".txt", ".md"}
+SUPPORTED_PDF_EXT = {".pdf"}
+
+
+# -----------------------------------
+# HELPERS
+# -----------------------------------
+def extract_text_from_pdf(path: str) -> str:
+    """Safely extract text from a PDF file."""
+    try:
+        reader = PdfReader(path)
+        pages = []
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            pages.append(page_text)
+        return "\n\n".join(pages)
+    except Exception as e:
+        print(f"[WARN] Could not read PDF {path}: {e}")
+        return ""
 
 
 # -----------------------------------
@@ -38,15 +57,36 @@ def load_documents(folder: str = "documents"):
             print(f"[DEBUG] Skipping non-file: {path}")
             continue
 
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
-        except Exception as e:
-            print(f"[WARN] Could not read {path}: {e}")
+        _, ext = os.path.splitext(file)
+        ext = ext.lower()
+
+        text = ""
+        if ext in SUPPORTED_TEXT_EXT:
+            # Plain text / markdown
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except Exception as e:
+                print(f"[WARN] Could not read text file {path}: {e}")
+                continue
+
+        elif ext in SUPPORTED_PDF_EXT:
+            # PDF
+            print(f"[INFO] Extracting text from PDF: {file}")
+            text = extract_text_from_pdf(path)
+
+        else:
+            # Any other file type is skipped (no crash!)
+            print(f"[SKIP] Unsupported file type '{file}', skipping.")
             continue
 
+        if not text or not text.strip():
+            print(f"[WARN] No text extracted from {file}, skipping.")
+            continue
+
+        # Simple character-based chunking
         chunk_size = 500
-        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
         for idx, chunk in enumerate(chunks):
             docs.append({
