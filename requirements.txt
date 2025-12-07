@@ -2,3 +2,9 @@ fastapi
 uvicorn[standard]
 chromadb
 pypdf
+python-docx
+docx2txt
+pytesseract
+pillow
+pdf2image
+
