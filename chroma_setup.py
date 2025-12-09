@@ -1,104 +1,77 @@
-# chroma_setup.py
-
 import os
 import chromadb
-from typing import List, Dict, Optional
+from typing import List, Dict
 
-# ---------------------------------------------------------
+# -----------------------------------
 # CHROMA PERSISTENT CLIENT
-# ---------------------------------------------------------
-# Chroma will store its data in ./db (persisted between runs)
+# -----------------------------------
 chroma_client = chromadb.PersistentClient(path="db")
+collection = chroma_client.get_or_create_collection(name="synapse_rag_v2")
 
-# We let Chroma use its default ONNX embedding (all-MiniLM-L6-v2)
-collection = chroma_client.get_or_create_collection(
-    name="synapse_rag_v2"
-)
+# ---------- Helpers ----------
 
-
-# ---------------------------------------------------------
-# TEXT CHUNKING
-# ---------------------------------------------------------
-def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
     """
-    Simple sliding-window chunker.
+    Simple overlapped text chunker.
     """
-    if not text:
-        return []
-
-    chunks = []
+    chunks: List[str] = []
     start = 0
-    text_len = len(text)
+    n = len(text)
 
-    while start < text_len:
-        end = min(start + chunk_size, text_len)
+    # Safety: truncate extremely long text to avoid MemoryError
+    max_chars = 200_000  # 200k characters ~ 40–50 pages of text
+    if n > max_chars:
+        text = text[:max_chars]
+        n = len(text)
+
+    while start < n:
+        end = min(start + chunk_size, n)
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
-        # move window with overlap
-        start = end - overlap
-        if start < 0:
-            start = 0
+        start += chunk_size - overlap
+        if chunk_size - overlap <= 0:
+            break
 
     return chunks
 
 
-# ---------------------------------------------------------
-# DOCUMENT INGESTION HELPERS
-# ---------------------------------------------------------
-def ingest_text(
-    text: str,
-    source_name: str = "unknown_source",
-    user_id: str = "global",
-    domain: str = "general",
-) -> int:
+def ingest_text(text: str, source_name: str, user_id: str = "seed", domain: str = "general") -> int:
     """
-    Chunk a raw text string and add it to ChromaDB with metadata.
-    Returns number of chunks ingested.
+    Add a single logical document (text) into Chroma as multiple chunks.
     """
-    text = text or ""
-    text = text.strip()
-    if not text:
-        return 0
-
     chunks = chunk_text(text)
     if not chunks:
         return 0
 
-    ids: List[str] = []
-    metadatas: List[Dict] = []
-
-    for idx, chunk in enumerate(chunks):
-        ids.append(f"{user_id}_{source_name}_{idx}")
-        metadatas.append(
-            {
-                "source": source_name,
-                "user_id": user_id,
-                "domain": domain,
-            }
-        )
+    base_id = f"{user_id}_{source_name}"
+    ids = [f"{base_id}_{i}" for i in range(len(chunks))]
+    metadatas = [
+        {
+            "source": source_name,
+            "user_id": user_id,
+            "domain": domain,
+        }
+        for _ in chunks
+    ]
 
     collection.add(
         ids=ids,
         documents=chunks,
         metadatas=metadatas,
     )
-
     return len(chunks)
 
+# ---------- SEED DOCUMENTS ----------
 
-def load_documents(folder: str = "documents") -> List[Dict]:
-    """
-    Old helper for seeding local /documents folder on boot.
-    Keeps things simple: treat everything as UTF-8 text file.
-    """
+def load_seed_documents(folder: str = "documents") -> List[Dict]:
     docs: List[Dict] = []
 
     print("[DEBUG] CWD:", os.getcwd())
     print("[DEBUG] Looking for folder:", folder)
 
     if not os.path.exists(folder):
-        print(f"[WARN] Documents folder '{folder}' not found.")
+        print(f"[WARN] Seed documents folder '{folder}' not found.")
         return docs
 
     files = os.listdir(folder)
@@ -107,8 +80,14 @@ def load_documents(folder: str = "documents") -> List[Dict]:
     for file in files:
         path = os.path.join(folder, file)
 
+        # Only regular files
         if not os.path.isfile(path):
-            print(f"[DEBUG] Skipping non-file: {path}")
+            continue
+
+        # Only read *text* files here, skip PDFs and others
+        lower = file.lower()
+        if not lower.endswith((".txt", ".md")):
+            print(f"[INFO] Skipping non-text seed file: {file}")
             continue
 
         try:
@@ -122,7 +101,7 @@ def load_documents(folder: str = "documents") -> List[Dict]:
             {
                 "text": text,
                 "source_name": file,
-                "user_id": "seed_docs",
+                "user_id": "seed",
                 "domain": "general",
             }
         )
@@ -131,47 +110,19 @@ def load_documents(folder: str = "documents") -> List[Dict]:
     return docs
 
 
-def ingest_documents():
-    """
-    Seed /documents folder into Chroma.
-    """
-    docs = load_documents()
-
+def ingest_seed_documents():
+    docs = load_seed_documents()
     if not docs:
-        print("[INFO] No seed documents found to ingest.")
+        print("[INFO] No seed documents to ingest.")
         return
 
     total_chunks = 0
     for d in docs:
         n = ingest_text(d["text"], d["source_name"], d["user_id"], d["domain"])
+        print(f"[INFO] Seed doc '{d['source_name']}' -> {n} chunks.")
         total_chunks += n
 
     print(f"[INFO] Seed ingestion complete. Total chunks: {total_chunks}")
-
-
-# ---------------------------------------------------------
-# QUERY FUNCTION (USED BY /search)
-# ---------------------------------------------------------
-def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
-    """
-    Simple, safe sliding-window chunker that never loops infinitely.
-    """
-    text = text or ""
-    text_len = len(text)
-    if text_len == 0:
-        return []
-
-    # step size ensures progress
-    step = max(1, chunk_size - overlap)
-
-    chunks: list[str] = []
-    for start in range(0, text_len, step):
-        end = min(start + chunk_size, text_len)
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-
-    return chunks
 
 
 if __name__ == "__main__":
@@ -180,6 +131,6 @@ if __name__ == "__main__":
 
     if count == 0:
         print("[INFO] No records found. Ingesting seed documents...")
-        ingest_documents()
+        ingest_seed_documents()
     else:
-        print("[INFO] ChromaDB already initialized with data. Skipping seed ingestion.")
+        print("[INFO] ChromaDB already initialized with data. Skipping ingestion.")
