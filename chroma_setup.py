@@ -1,280 +1,185 @@
 # chroma_setup.py
+
 import os
-from typing import List, Dict, Any, Optional
-
 import chromadb
+from typing import List, Dict, Optional
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "db")
-DOCUMENTS_FOLDER = os.getenv("DOCUMENTS_FOLDER", "documents")
+# ---------------------------------------------------------
+# CHROMA PERSISTENT CLIENT
+# ---------------------------------------------------------
+# Chroma will store its data in ./db (persisted between runs)
+chroma_client = chromadb.PersistentClient(path="db")
 
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
-
-# -----------------------------
-# CLIENT + COLLECTION
-# -----------------------------
-chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-collection = chroma_client.get_or_create_collection(name="synapse_rag_v2")
+# We let Chroma use its default ONNX embedding (all-MiniLM-L6-v2)
+collection = chroma_client.get_or_create_collection(
+    name="synapse_rag_v2"
+)
 
 
-# -----------------------------
-# UTIL: CHUNKING
-# -----------------------------
-def _split_text(
-    text: str,
-    chunk_size: int = CHUNK_SIZE,
-    overlap: int = CHUNK_OVERLAP,
-) -> List[str]:
-    """Simple sliding-window splitter."""
-    text = text or ""
-    if not text.strip():
+# ---------------------------------------------------------
+# TEXT CHUNKING
+# ---------------------------------------------------------
+def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
+    """
+    Simple sliding-window chunker.
+    """
+    if not text:
         return []
 
-    chunks: List[str] = []
+    chunks = []
     start = 0
-    n = len(text)
+    text_len = len(text)
 
-    while start < n:
-        end = min(start + chunk_size, n)
-        chunk = text[start:end]
-        chunks.append(chunk)
-
-        if end == n:
-            break
-
+    while start < text_len:
+        end = min(start + chunk_size, text_len)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
         # move window with overlap
         start = end - overlap
+        if start < 0:
+            start = 0
 
     return chunks
 
 
-# -----------------------------
-# UTIL: FILE READERS
-# -----------------------------
-def _read_plain_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read()
-
-
-def _read_pdf(path: str) -> str:
-    """Read PDF using pypdf if installed."""
-    try:
-        from pypdf import PdfReader  # type: ignore
-    except ImportError:
-        print("[WARN] pypdf not installed; cannot read PDF:", path)
-        return ""
-
-    try:
-        reader = PdfReader(path)
-        parts: List[str] = []
-        for page in reader.pages:
-            try:
-                parts.append(page.extract_text() or "")
-            except Exception:
-                continue
-        return "\n".join(parts)
-    except Exception as e:
-        print(f"[WARN] Could not read PDF {path}: {e}")
-        return ""
-
-
-def _read_docx(path: str) -> str:
-    """Read DOCX using python-docx if installed."""
-    try:
-        import docx  # type: ignore
-    except ImportError:
-        print("[WARN] python-docx not installed; cannot read DOCX:", path)
-        return ""
-
-    try:
-        doc = docx.Document(path)
-        return "\n".join(p.text for p in doc.paragraphs)
-    except Exception as e:
-        print(f"[WARN] Could not read DOCX {path}: {e}")
-        return ""
-
-
-# -----------------------------
-# BULK LOAD FROM FOLDER
-# -----------------------------
-def load_documents_from_folder(
-    folder: str = DOCUMENTS_FOLDER,
-    user_id: Optional[str] = None,
-    domain: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+# ---------------------------------------------------------
+# DOCUMENT INGESTION HELPERS
+# ---------------------------------------------------------
+def ingest_text(
+    text: str,
+    source_name: str = "unknown_source",
+    user_id: str = "global",
+    domain: str = "general",
+) -> int:
     """
-    Scan a folder for txt/md/pdf/docx and return prepared chunk dicts.
+    Chunk a raw text string and add it to ChromaDB with metadata.
+    Returns number of chunks ingested.
     """
-    docs: List[Dict[str, Any]] = []
+    text = text or ""
+    text = text.strip()
+    if not text:
+        return 0
+
+    chunks = chunk_text(text)
+    if not chunks:
+        return 0
+
+    ids: List[str] = []
+    metadatas: List[Dict] = []
+
+    for idx, chunk in enumerate(chunks):
+        ids.append(f"{user_id}_{source_name}_{idx}")
+        metadatas.append(
+            {
+                "source": source_name,
+                "user_id": user_id,
+                "domain": domain,
+            }
+        )
+
+    collection.add(
+        ids=ids,
+        documents=chunks,
+        metadatas=metadatas,
+    )
+
+    return len(chunks)
+
+
+def load_documents(folder: str = "documents") -> List[Dict]:
+    """
+    Old helper for seeding local /documents folder on boot.
+    Keeps things simple: treat everything as UTF-8 text file.
+    """
+    docs: List[Dict] = []
+
+    print("[DEBUG] CWD:", os.getcwd())
+    print("[DEBUG] Looking for folder:", folder)
 
     if not os.path.exists(folder):
         print(f"[WARN] Documents folder '{folder}' not found.")
         return docs
 
-    for filename in os.listdir(folder):
-        path = os.path.join(folder, filename)
+    files = os.listdir(folder)
+    print("[DEBUG] Files in documents:", files)
+
+    for file in files:
+        path = os.path.join(folder, file)
+
         if not os.path.isfile(path):
+            print(f"[DEBUG] Skipping non-file: {path}")
             continue
 
-        ext = os.path.splitext(filename)[1].lower()
-
-        if ext in {".txt", ".md"}:
-            text = _read_plain_text(path)
-        elif ext == ".pdf":
-            text = _read_pdf(path)
-        elif ext == ".docx":
-            text = _read_docx(path)
-        else:
-            print("[DEBUG] Skipping unsupported file type:", path)
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except Exception as e:
+            print(f"[WARN] Could not read {path}: {e}")
             continue
 
-        if not text.strip():
-            continue
+        docs.append(
+            {
+                "text": text,
+                "source_name": file,
+                "user_id": "seed_docs",
+                "domain": "general",
+            }
+        )
 
-        chunks = _split_text(text)
-        for idx, chunk in enumerate(chunks):
-            docs.append(
-                {
-                    "id": f"{filename}_{idx}",
-                    "text": chunk,
-                    "source": filename,
-                    "user_id": user_id or "global",
-                    "domain": domain or "general",
-                }
-            )
-
-    print(f"[DEBUG] Prepared {len(docs)} chunks from folder {folder}")
+    print(f"[DEBUG] Total seed docs prepared: {len(docs)}")
     return docs
 
 
-# -----------------------------
-# INGEST HELPERS
-# -----------------------------
-def ingest_text(
-    text: str,
-    source_name: str = "uploaded",
-    user_id: Optional[str] = None,
-    domain: Optional[str] = None,
-) -> int:
+def ingest_documents():
     """
-    Ingest arbitrary text (e.g. from uploads, APIs) into Chroma.
-    Returns number of chunks added.
+    Seed /documents folder into Chroma.
     """
-    text = (text or "").strip()
-    if not text:
-        return 0
-
-    chunks = _split_text(text)
-    ids: List[str] = []
-    docs: List[str] = []
-    metas: List[Dict[str, Any]] = []
-
-    base = source_name.replace(" ", "_")
-
-    for idx, chunk in enumerate(chunks):
-        ids.append(f"{base}_{idx}")
-        docs.append(chunk)
-        metas.append(
-            {
-                "source": source_name,
-                "user_id": user_id or "global",
-                "domain": domain or "general",
-            }
-        )
+    docs = load_documents()
 
     if not docs:
-        return 0
+        print("[INFO] No seed documents found to ingest.")
+        return
 
-    collection.add(ids=ids, documents=docs, metadatas=metas)
-    return len(docs)
+    total_chunks = 0
+    for d in docs:
+        n = ingest_text(d["text"], d["source_name"], d["user_id"], d["domain"])
+        total_chunks += n
+
+    print(f"[INFO] Seed ingestion complete. Total chunks: {total_chunks}")
 
 
-def ingest_documents_from_folder() -> int:
+# ---------------------------------------------------------
+# QUERY FUNCTION (USED BY /search)
+# ---------------------------------------------------------
+def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
     """
-    One-shot bulk ingest from the DOCUMENTS_FOLDER.
+    Simple, safe sliding-window chunker that never loops infinitely.
     """
-    docs = load_documents_from_folder()
-    if not docs:
-        return 0
-
-    ids = [d["id"] for d in docs]
-    texts = [d["text"] for d in docs]
-    metas = [
-        {"source": d["source"], "user_id": d["user_id"], "domain": d["domain"]}
-        for d in docs
-    ]
-
-    collection.add(ids=ids, documents=texts, metadatas=metas)
-    return len(texts)
-
-
-# -----------------------------
-# QUERY
-# -----------------------------
-def query_chunks(
-    query_text: str,
-    top_k: int = 5,
-    user_id: Optional[str] = None,
-    domain: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Query the vector store, optionally filtered by user_id + domain.
-    """
-    query_text = (query_text or "").strip()
-    if not query_text:
+    text = text or ""
+    text_len = len(text)
+    if text_len == 0:
         return []
 
-    where: Dict[str, Any] = {}
-    if user_id:
-        where["user_id"] = user_id
-    if domain:
-        where["domain"] = domain
+    # step size ensures progress
+    step = max(1, chunk_size - overlap)
 
-    try:
-        kwargs: Dict[str, Any] = {
-            "query_texts": [query_text],
-            "n_results": top_k,
-        }
-        if where:
-            kwargs["where"] = where
-
-        results = collection.query(**kwargs)
-    except Exception as e:
-        print("[ERROR] Chroma query failed:", e)
-        return []
-
-    docs_list = results.get("documents") or []
-    metas_list = results.get("metadatas") or []
-
-    if not docs_list or not docs_list[0]:
-        return []
-
-    chunks: List[Dict[str, Any]] = []
-    for i, text in enumerate(docs_list[0]):
-        meta = metas_list[0][i] if metas_list and metas_list[0] else {}
-        chunks.append(
-            {
-                "text": text,
-                "source": meta.get("source", "unknown"),
-                "user_id": meta.get("user_id"),
-                "domain": meta.get("domain"),
-            }
-        )
+    chunks: list[str] = []
+    for start in range(0, text_len, step):
+        end = min(start + chunk_size, text_len)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
 
     return chunks
 
 
-# -----------------------------
-# DEBUG ENTRYPOINT
-# -----------------------------
 if __name__ == "__main__":
     count = collection.count()
-    print("[INFO] Current collection size:", count)
+    print(f"[INFO] Collection currently has {count} records.")
 
     if count == 0:
-        print("[INFO] No records found, ingesting from folder...")
-        added = ingest_documents_from_folder()
-        print(f"[INFO] Ingested {added} chunks.")
+        print("[INFO] No records found. Ingesting seed documents...")
+        ingest_documents()
+    else:
+        print("[INFO] ChromaDB already initialized with data. Skipping seed ingestion.")
